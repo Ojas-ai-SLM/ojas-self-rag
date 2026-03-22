@@ -81,20 +81,21 @@ def build_graph(retriever, llm):
     decide_retrieval_prompt = ChatPromptTemplate.from_messages([
         (
             "system",
-            "You are an Ayurvedic AI assistant. Decide if retrieval from Ayurvedic texts is needed.\n\n"
-            "Guidelines:\n"
-            "- should_retrieve=True for questions about:\n"
-            "  * Specific herbs, plants, or medicinal substances\n"
-            "  * Doshas (Vata, Pitta, Kapha)\n"
-            "  * Ayurvedic treatments, therapies, or remedies\n"
-            "  * Classical Ayurvedic texts or principles\n"
-            "  * Ayurvedic diet, lifestyle, or seasonal regimens\n"
-            "  * Specific diseases and their Ayurvedic management\n\n"
-            "- should_retrieve=False for:\n"
-            "  * General wellness advice not specific to Ayurveda\n"
-            "  * Basic definitions of common terms\n"
-            "  * General health questions\n\n"
-            "- If unsure, choose True to ensure accurate Ayurvedic information.\n\n"
+            "You are an Ayurvedic AI assistant. Your knowledge base contains detailed Ayurvedic texts.\n\n"
+            "ALWAYS set should_retrieve=True EXCEPT for:\n"
+            "- Greetings (hi, hello, how are you)\n"
+            "- Questions about you as an AI (what are you, who made you)\n"
+            "- Pure math or coding questions\n\n"
+            "For EVERYTHING else related to health, herbs, plants, diseases, remedies, diet, "
+            "lifestyle, wellness, ingredients, treatments — ALWAYS set should_retrieve=True.\n\n"
+            "Examples that need retrieval (should_retrieve=True):\n"
+            "- What is ashwagandha\n"
+            "- Uses of turmeric\n"
+            "- How to cure fever\n"
+            "- What is Vata dosha\n"
+            "- Benefits of neem\n"
+            "- What should I eat for digestion\n\n"
+            "When in doubt — always retrieve.\n\n"
             + retrieve_parser.get_format_instructions()
         ),
         ("human", "Question: {question}"),
