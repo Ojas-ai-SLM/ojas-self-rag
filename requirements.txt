@@ -1,0 +1,20 @@
+fastapi
+uvicorn[standard]
+python-dotenv
+python-multipart
+pydantic
+langchain
+langchain-core
+langchain-community
+langchain-text-splitters
+langchain-groq
+langchain-huggingface==0.1.2
+langgraph
+faiss-cpu
+pypdf
+numpy<2
+sentence-transformers==3.0.1
+transformers==4.44.2
+tokenizers==0.19.1
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.4.0+cpu
