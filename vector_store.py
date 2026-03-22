@@ -5,16 +5,20 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 
 DOCS_DIR = Path("docs")
-
-# Two separate locations:
-# - BAKED_INDEX: inside the image (committed to git), read-only reference
-# - VOLUME_INDEX: on the Railway volume, persists across restarts
 BAKED_INDEX = Path("faiss_index_baked")
 VOLUME_INDEX = Path("faiss_index")
 
+EMBEDDING_MODEL = "BAAI/bge-base-en-v1.5"
+
 
 def get_embeddings():
-    return HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+    return HuggingFaceEmbeddings(
+        model_name=EMBEDDING_MODEL,
+        model_kwargs={"device": "cpu"},
+        encode_kwargs={
+            "normalize_embeddings": True  # required for BGE models
+        }
+    )
 
 
 def build_index(embeddings, save_path: Path):
@@ -53,12 +57,6 @@ def _load_from(path: Path, embeddings):
 
 
 def load_or_build_index(embeddings):
-    """
-    Priority order:
-    1. Load from volume (persisted index with any uploaded docs)
-    2. Load from baked index (committed to git, inside image)
-    3. Build fresh from PDFs
-    """
     volume_index_file = VOLUME_INDEX / "index.faiss"
     baked_index_file = BAKED_INDEX / "index.faiss"
 
@@ -69,7 +67,6 @@ def load_or_build_index(embeddings):
     if baked_index_file.exists():
         print(f"  Loading baked index from image ({BAKED_INDEX}/)")
         store = _load_from(BAKED_INDEX, embeddings)
-        # Copy to volume so future uploads persist correctly
         print(f"  Copying baked index to volume for persistence...")
         store.save_local(str(VOLUME_INDEX))
         return store
