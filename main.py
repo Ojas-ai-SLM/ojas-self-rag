@@ -162,7 +162,7 @@ def get_guardrail_response(question: str):
             "I specialize in Ayurveda and holistic wellness. "
             "I am not able to help with that topic, but I would be happy to answer any questions "
             "about Ayurvedic herbs, remedies, doshas, or natural wellness. "
-            "What Ayurvedic topic can I help you with?"
+            "What Ayurvedic topic can I help you with? Can you please ask an Ayurveda-related question?"
         )
 
     return None
