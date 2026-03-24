@@ -113,6 +113,61 @@ async def health():
     return {"status": "ok" if state.get("ready") else "loading", "pipeline_ready": state.get("ready", False)}
 
 
+# --- Guardrail patterns ---
+GREETINGS = [
+    "hi", "hello", "hey", "hii", "hiii", "howdy", "greetings",
+    "good morning", "good afternoon", "good evening", "good night",
+    "whats up", "what's up", "sup", "namaste", "namaskar",
+]
+
+OFF_TOPIC_KEYWORDS = [
+    "cricket", "football", "movie", "film", "stock", "crypto",
+    "bitcoin", "coding", "programming", "python", "javascript",
+    "recipe", "cook", "politics", "election", "war",
+]
+
+ABOUT_OJAS = [
+    "who are you", "what are you", "what is ojas", "tell me about yourself",
+    "what can you do", "help", "how does this work", "what do you know",
+]
+
+def get_guardrail_response(question: str):
+    q = question.lower().strip().rstrip("?!")
+
+    # Greeting
+    if q in GREETINGS or any(q.startswith(g) for g in GREETINGS):
+        return (
+            "Namaste! 🙏 I am Ojas.ai, your Ayurvedic wellness assistant. "
+            "I can help you with:\n"
+            "- Information about Ayurvedic herbs and their uses\n"
+            "- Understanding your dosha (Vata, Pitta, Kapha)\n"
+            "- Ayurvedic remedies for common ailments\n"
+            "- Diet and lifestyle recommendations\n\n"
+            "How can I assist you on your wellness journey today?"
+        )
+
+    # About Ojas
+    if any(phrase in q for phrase in ABOUT_OJAS):
+        return (
+            "I am Ojas.ai, an AI assistant specialized in Ayurveda — the ancient Indian science of life. "
+            "My knowledge comes from classical Ayurvedic texts including the Charaka Samhita, "
+            "Sushruta Samhita, and other traditional sources.\n\n"
+            "I can answer questions about herbs, doshas, remedies, diet, and Ayurvedic treatments. "
+            "Please consult a qualified Ayurvedic practitioner for personalized medical advice."
+        )
+
+    # Off-topic
+    if any(keyword in q for keyword in OFF_TOPIC_KEYWORDS):
+        return (
+            "I specialize in Ayurveda and holistic wellness. "
+            "I am not able to help with that topic, but I would be happy to answer any questions "
+            "about Ayurvedic herbs, remedies, doshas, or natural wellness. "
+            "What Ayurvedic topic can I help you with?"
+        )
+
+    return None
+
+
 @app.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest):
     if state.get("error"):
@@ -121,6 +176,11 @@ async def chat(req: ChatRequest):
         raise HTTPException(status_code=503, detail="Pipeline is still loading, try again in a moment.")
     if not req.question.strip():
         raise HTTPException(status_code=400, detail="Question cannot be empty.")
+
+    # Check guardrails before hitting the RAG pipeline
+    guardrail_response = get_guardrail_response(req.question)
+    if guardrail_response:
+        return ChatResponse(answer=guardrail_response)
 
     initial = {
         "question": req.question,
