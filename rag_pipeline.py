@@ -47,16 +47,6 @@ class State(TypedDict):
 # -----------------------------
 # Pydantic models for structured outputs
 # -----------------------------
-class SafetyDecision(BaseModel):
-    is_safe: bool = Field(
-        ...,
-        description="True if query is safe and appropriate for Ayurvedic assistant, False if harmful/inappropriate"
-    )
-    reason: str = Field(
-        ...,
-        description="Brief reason for the safety decision"
-    )
-
 class RetrieveDecision(BaseModel):
     should_retrieve: bool = Field(
         ...,
@@ -88,7 +78,6 @@ class RewriteDecision(BaseModel):
 # Build the Self-RAG graph
 # -----------------------------
 def build_graph(retriever, llm):
-    safety_parser = PydanticOutputParser(pydantic_object=SafetyDecision)
     retrieve_parser = PydanticOutputParser(pydantic_object=RetrieveDecision)
     relevance_parser = PydanticOutputParser(pydantic_object=RelevanceDecision)
     issup_parser = PydanticOutputParser(pydantic_object=IsSUPDecision)
@@ -100,23 +89,24 @@ def build_graph(retriever, llm):
         (
             "system",
             "You are a safety filter for Ojas.ai, an Ayurvedic wellness assistant.\n\n"
-            "Your job is to determine if a user query is SAFE and APPROPRIATE to process.\n\n"
-            "Mark as is_safe=False (BLOCK) for queries about:\n"
-            "1. Violence or harm: killing, hurting, poisoning, attacking, torturing anyone\n"
-            "2. Weapons or explosives: making bombs, weapons, dangerous substances\n"
-            "3. Self-harm or suicide: methods to hurt oneself, overdose, ending life\n"
-            "4. Illegal drugs: making, buying, or using recreational drugs\n"
-            "5. Inappropriate personal topics: dating advice, romantic relationships, sexual content\n"
-            "6. Illegal activities: hacking, fraud, scams, theft\n"
-            "7. Misuse of Ayurvedic knowledge: using herbs to harm, poison, or drug someone\n\n"
-            "Mark as is_safe=True (ALLOW) for:\n"
-            "1. Genuine health and wellness questions\n"
-            "2. Questions about Ayurvedic herbs, remedies, doshas\n"
-            "3. Diet and lifestyle questions\n"
-            "4. General greetings and questions about the assistant\n"
-            "5. Off-topic but harmless questions (these will be handled separately)\n\n"
-            "Be strict about safety. When in doubt about harmful intent, mark as unsafe.\n\n"
-            + safety_parser.get_format_instructions()
+            "Your ONLY job is to determine if a user query is SAFE or UNSAFE.\n\n"
+            "Reply with ONLY one word: SAFE or UNSAFE\n\n"
+            "Mark as UNSAFE for queries about:\n"
+            "- Violence or harm: killing, hurting, poisoning, attacking, torturing anyone\n"
+            "- Weapons or explosives: making bombs, weapons, dangerous substances\n"
+            "- Self-harm or suicide: methods to hurt oneself, overdose, ending life\n"
+            "- Illegal drugs: making, buying, or using recreational drugs\n"
+            "- Inappropriate personal topics: dating advice, romantic relationships, sexual content\n"
+            "- Illegal activities: hacking, fraud, scams, theft\n"
+            "- Misuse of Ayurvedic knowledge: using herbs to harm, poison, or drug someone\n\n"
+            "Mark as SAFE for:\n"
+            "- Genuine health and wellness questions\n"
+            "- Questions about Ayurvedic herbs, remedies, doshas\n"
+            "- Diet and lifestyle questions\n"
+            "- General greetings\n"
+            "- Off-topic but harmless questions\n\n"
+            "Be STRICT. If there is ANY harmful intent, reply UNSAFE.\n\n"
+            "Reply with ONLY: SAFE or UNSAFE"
         ),
         ("human", "Query: {question}"),
     ])
@@ -277,28 +267,37 @@ def build_graph(retriever, llm):
     MAX_RETRIES = 4
     MAX_REWRITE_TRIES = 2
 
+    SAFETY_BLOCK_MESSAGE = (
+        "I cannot help with that request. I am Ojas.ai, an Ayurvedic wellness assistant "
+        "focused on traditional medicine, herbs, and holistic health.\n\n"
+        "If you are experiencing a crisis or having thoughts of self-harm, please reach out "
+        "to a mental health professional or crisis helpline immediately.\n\n"
+        "I am here to help with Ayurvedic wellness questions. How can I assist you with your "
+        "health and wellness journey?"
+    )
+
     # --- Node functions ---
     def safety_check(state: State):
-        """Check if the query is safe and appropriate for the Ayurvedic assistant."""
+        """Check if the query is safe and appropriate for the Ayurvedic assistant.
+
+        Uses simple string matching on LLM response (SAFE/UNSAFE).
+        Fails CLOSED - if anything goes wrong, query is blocked.
+        """
         try:
             response = llm.invoke(safety_check_prompt.format_messages(question=state["question"]))
-            decision = safety_parser.parse(response.content)
-            if not decision.is_safe:
-                return {
-                    "is_safe": False,
-                    "safety_response": (
-                        "I cannot help with that request. I am Ojas.ai, an Ayurvedic wellness assistant "
-                        "focused on traditional medicine, herbs, and holistic health.\n\n"
-                        "If you are experiencing a crisis or having thoughts of self-harm, please reach out "
-                        "to a mental health professional or crisis helpline immediately.\n\n"
-                        "I am here to help with Ayurvedic wellness questions. How can I assist you with your "
-                        "health and wellness journey?"
-                    )
-                }
-            return {"is_safe": True, "safety_response": ""}
-        except:
-            # If parsing fails, assume safe and let other checks handle it
-            return {"is_safe": True, "safety_response": ""}
+            result = response.content.strip().upper()
+
+            # Check if response contains SAFE (and not UNSAFE)
+            if "UNSAFE" in result:
+                return {"is_safe": False, "safety_response": SAFETY_BLOCK_MESSAGE}
+            elif "SAFE" in result:
+                return {"is_safe": True, "safety_response": ""}
+            else:
+                # Unclear response - fail closed (block the query)
+                return {"is_safe": False, "safety_response": SAFETY_BLOCK_MESSAGE}
+        except Exception:
+            # If LLM call fails, fail closed (block the query)
+            return {"is_safe": False, "safety_response": SAFETY_BLOCK_MESSAGE}
 
     def route_after_safety(state: State) -> Literal["blocked_response", "decide_retrieval"]:
         """Route based on safety check result."""
