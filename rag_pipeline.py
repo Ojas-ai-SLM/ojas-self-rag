@@ -14,6 +14,10 @@ from typing import TypedDict
 class State(TypedDict):
     question: str
 
+    # Safety check
+    is_safe: bool
+    safety_response: str
+
     # Retrieval
     retrieval_query: str
     rewrite_tries: int
@@ -26,6 +30,9 @@ class State(TypedDict):
 
     # Answer generation
     answer: str
+
+    # Sources - document metadata for attribution
+    sources: List[dict]
 
     # Verification
     issup: Literal["fully_supported", "partially_supported", "no_support"]
@@ -40,6 +47,16 @@ class State(TypedDict):
 # -----------------------------
 # Pydantic models for structured outputs
 # -----------------------------
+class SafetyDecision(BaseModel):
+    is_safe: bool = Field(
+        ...,
+        description="True if query is safe and appropriate for Ayurvedic assistant, False if harmful/inappropriate"
+    )
+    reason: str = Field(
+        ...,
+        description="Brief reason for the safety decision"
+    )
+
 class RetrieveDecision(BaseModel):
     should_retrieve: bool = Field(
         ...,
@@ -71,6 +88,7 @@ class RewriteDecision(BaseModel):
 # Build the Self-RAG graph
 # -----------------------------
 def build_graph(retriever, llm):
+    safety_parser = PydanticOutputParser(pydantic_object=SafetyDecision)
     retrieve_parser = PydanticOutputParser(pydantic_object=RetrieveDecision)
     relevance_parser = PydanticOutputParser(pydantic_object=RelevanceDecision)
     issup_parser = PydanticOutputParser(pydantic_object=IsSUPDecision)
@@ -78,6 +96,31 @@ def build_graph(retriever, llm):
     rewrite_parser = PydanticOutputParser(pydantic_object=RewriteDecision)
 
     # --- Prompts ---
+    safety_check_prompt = ChatPromptTemplate.from_messages([
+        (
+            "system",
+            "You are a safety filter for Ojas.ai, an Ayurvedic wellness assistant.\n\n"
+            "Your job is to determine if a user query is SAFE and APPROPRIATE to process.\n\n"
+            "Mark as is_safe=False (BLOCK) for queries about:\n"
+            "1. Violence or harm: killing, hurting, poisoning, attacking, torturing anyone\n"
+            "2. Weapons or explosives: making bombs, weapons, dangerous substances\n"
+            "3. Self-harm or suicide: methods to hurt oneself, overdose, ending life\n"
+            "4. Illegal drugs: making, buying, or using recreational drugs\n"
+            "5. Inappropriate personal topics: dating advice, romantic relationships, sexual content\n"
+            "6. Illegal activities: hacking, fraud, scams, theft\n"
+            "7. Misuse of Ayurvedic knowledge: using herbs to harm, poison, or drug someone\n\n"
+            "Mark as is_safe=True (ALLOW) for:\n"
+            "1. Genuine health and wellness questions\n"
+            "2. Questions about Ayurvedic herbs, remedies, doshas\n"
+            "3. Diet and lifestyle questions\n"
+            "4. General greetings and questions about the assistant\n"
+            "5. Off-topic but harmless questions (these will be handled separately)\n\n"
+            "Be strict about safety. When in doubt about harmful intent, mark as unsafe.\n\n"
+            + safety_parser.get_format_instructions()
+        ),
+        ("human", "Query: {question}"),
+    ])
+
     decide_retrieval_prompt = ChatPromptTemplate.from_messages([
         (
             "system",
@@ -235,6 +278,41 @@ def build_graph(retriever, llm):
     MAX_REWRITE_TRIES = 2
 
     # --- Node functions ---
+    def safety_check(state: State):
+        """Check if the query is safe and appropriate for the Ayurvedic assistant."""
+        try:
+            response = llm.invoke(safety_check_prompt.format_messages(question=state["question"]))
+            decision = safety_parser.parse(response.content)
+            if not decision.is_safe:
+                return {
+                    "is_safe": False,
+                    "safety_response": (
+                        "I cannot help with that request. I am Ojas.ai, an Ayurvedic wellness assistant "
+                        "focused on traditional medicine, herbs, and holistic health.\n\n"
+                        "If you are experiencing a crisis or having thoughts of self-harm, please reach out "
+                        "to a mental health professional or crisis helpline immediately.\n\n"
+                        "I am here to help with Ayurvedic wellness questions. How can I assist you with your "
+                        "health and wellness journey?"
+                    )
+                }
+            return {"is_safe": True, "safety_response": ""}
+        except:
+            # If parsing fails, assume safe and let other checks handle it
+            return {"is_safe": True, "safety_response": ""}
+
+    def route_after_safety(state: State) -> Literal["blocked_response", "decide_retrieval"]:
+        """Route based on safety check result."""
+        if state.get("is_safe", True):
+            return "decide_retrieval"
+        return "blocked_response"
+
+    def blocked_response(state: State):
+        """Return the safety block response as the final answer."""
+        return {
+            "answer": state.get("safety_response", "I cannot help with that request."),
+            "sources": []
+        }
+
     def decide_retrieval(state: State):
         try:
             response = llm.invoke(decide_retrieval_prompt.format_messages(question=state["question"]))
@@ -277,18 +355,37 @@ def build_graph(retriever, llm):
         return "no_answer_found"
 
     def generate_from_context(state: State):
-        context = "\n\n---\n\n".join([d.page_content for d in state.get("relevant_docs", [])]).strip()
+        relevant_docs = state.get("relevant_docs", [])
+        context = "\n\n---\n\n".join([d.page_content for d in relevant_docs]).strip()
         if not context:
-            return {"answer": "No answer found in Ayurvedic texts.", "context": ""}
+            return {"answer": "No answer found in Ayurvedic texts.", "context": "", "sources": []}
+
+        # Extract source metadata for attribution
+        sources = []
+        seen_sources = set()
+        for doc in relevant_docs:
+            source_path = doc.metadata.get("source", "Unknown")
+            page = doc.metadata.get("page", 0)
+            # Extract just the filename from the full path
+            source_name = source_path.split("/")[-1].split("\\")[-1] if source_path != "Unknown" else "Unknown"
+            source_key = f"{source_name}:{page}"
+            if source_key not in seen_sources:
+                seen_sources.add(source_key)
+                sources.append({
+                    "document": source_name,
+                    "page": page + 1  # Convert 0-indexed to 1-indexed for display
+                })
+
         out = llm.invoke(
             rag_generation_prompt.format_messages(question=state["question"], context=context)
         )
-        return {"answer": out.content, "context": context}
+        return {"answer": out.content, "context": context, "sources": sources}
 
     def no_answer_found(state: State):
         return {
             "answer": "I could not find relevant information in the Ayurvedic knowledge base. Please consult an Ayurvedic practitioner for specific guidance.",
-            "context": ""
+            "context": "",
+            "sources": []
         }
 
     def is_sup(state: State):
@@ -372,6 +469,8 @@ def build_graph(retriever, llm):
     # --- Build graph ---
     g = StateGraph(State)
 
+    g.add_node("safety_check", safety_check)
+    g.add_node("blocked_response", blocked_response)
     g.add_node("decide_retrieval", decide_retrieval)
     g.add_node("generate_direct", generate_direct)
     g.add_node("retrieve", retrieve)
@@ -384,7 +483,15 @@ def build_graph(retriever, llm):
     g.add_node("is_use", is_use)
     g.add_node("rewrite_question", rewrite_question)
 
-    g.add_edge(START, "decide_retrieval")
+    # Start with safety check
+    g.add_edge(START, "safety_check")
+    g.add_conditional_edges(
+        "safety_check",
+        route_after_safety,
+        {"blocked_response": "blocked_response", "decide_retrieval": "decide_retrieval"},
+    )
+    g.add_edge("blocked_response", END)
+
     g.add_conditional_edges(
         "decide_retrieval",
         route_after_decide,

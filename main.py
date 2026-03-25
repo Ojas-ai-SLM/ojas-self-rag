@@ -11,6 +11,7 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from langchain_groq import ChatGroq
 from pydantic import BaseModel
+from typing import List
 
 from rag_pipeline import build_graph
 from vector_store import add_documents_to_index, get_embeddings, load_or_build_index
@@ -102,8 +103,13 @@ app.add_middleware(
 class ChatRequest(BaseModel):
     question: str
 
+class SourceInfo(BaseModel):
+    document: str
+    page: int
+
 class ChatResponse(BaseModel):
     answer: str
+    sources: List[SourceInfo] = []
 
 
 @app.get("/health")
@@ -113,7 +119,7 @@ async def health():
     return {"status": "ok" if state.get("ready") else "loading", "pipeline_ready": state.get("ready", False)}
 
 
-# --- Guardrail patterns ---
+# --- Guardrail patterns (simple checks before LLM) ---
 GREETINGS = [
     "hi", "hello", "hey", "hii", "hiii", "howdy", "greetings",
     "good morning", "good afternoon", "good evening", "good night",
@@ -132,6 +138,11 @@ ABOUT_OJAS = [
 ]
 
 def get_guardrail_response(question: str):
+    """Simple pattern-based guardrails for greetings, about, and off-topic.
+
+    Note: Harmful query detection is handled by the LLM-based safety_check node
+    in the graph pipeline for more robust and flexible filtering.
+    """
     q = question.lower().strip().rstrip("?!")
 
     # Greeting
@@ -156,7 +167,7 @@ def get_guardrail_response(question: str):
             "Please consult a qualified Ayurvedic practitioner for personalized medical advice."
         )
 
-    # Off-topic
+    # Off-topic (harmless but not Ayurveda-related)
     if any(keyword in q for keyword in OFF_TOPIC_KEYWORDS):
         return (
             "I specialize in Ayurveda and holistic wellness. "
@@ -184,12 +195,17 @@ async def chat(req: ChatRequest):
 
     initial = {
         "question": req.question,
+        # Safety check
+        "is_safe": True,
+        "safety_response": "",
+        # Retrieval
         "retrieval_query": "",
         "rewrite_tries": 0,
         "docs": [],
         "relevant_docs": [],
         "context": "",
         "answer": "",
+        "sources": [],
         "issup": "",
         "evidence": [],
         "retries": 0,
@@ -202,7 +218,10 @@ async def chat(req: ChatRequest):
         lambda: state["graph"].invoke(initial, config={"recursion_limit": 80})
     )
 
-    return ChatResponse(answer=result.get("answer", ""))
+    return ChatResponse(
+        answer=result.get("answer", ""),
+        sources=result.get("sources", [])
+    )
 
 
 @app.post("/documents/upload")
