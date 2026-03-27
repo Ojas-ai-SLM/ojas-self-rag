@@ -6,6 +6,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
 from langgraph.graph import StateGraph, START, END
 from typing import TypedDict
+import os
 
 
 # -----------------------------
@@ -30,8 +31,6 @@ class State(TypedDict):
 
     # Answer generation
     answer: str
-
-    # Sources - document metadata for attribution
     sources: List[dict]
 
     # Verification
@@ -278,35 +277,24 @@ def build_graph(retriever, llm):
 
     # --- Node functions ---
     def safety_check(state: State):
-        """Check if the query is safe and appropriate for the Ayurvedic assistant.
-
-        Uses simple string matching on LLM response (SAFE/UNSAFE).
-        Fails CLOSED - if anything goes wrong, query is blocked.
-        """
         try:
             response = llm.invoke(safety_check_prompt.format_messages(question=state["question"]))
             result = response.content.strip().upper()
-
-            # Check if response contains SAFE (and not UNSAFE)
             if "UNSAFE" in result:
                 return {"is_safe": False, "safety_response": SAFETY_BLOCK_MESSAGE}
             elif "SAFE" in result:
                 return {"is_safe": True, "safety_response": ""}
             else:
-                # Unclear response - fail closed (block the query)
                 return {"is_safe": False, "safety_response": SAFETY_BLOCK_MESSAGE}
         except Exception:
-            # If LLM call fails, fail closed (block the query)
             return {"is_safe": False, "safety_response": SAFETY_BLOCK_MESSAGE}
 
     def route_after_safety(state: State) -> Literal["blocked_response", "decide_retrieval"]:
-        """Route based on safety check result."""
         if state.get("is_safe", True):
             return "decide_retrieval"
         return "blocked_response"
 
     def blocked_response(state: State):
-        """Return the safety block response as the final answer."""
         return {
             "answer": state.get("safety_response", "I cannot help with that request."),
             "sources": []
@@ -325,7 +313,7 @@ def build_graph(retriever, llm):
 
     def generate_direct(state: State):
         out = llm.invoke(direct_generation_prompt.format_messages(question=state["question"]))
-        return {"answer": out.content}
+        return {"answer": out.content, "sources": []}
 
     def retrieve(state: State):
         q = state.get("retrieval_query") or state["question"]
@@ -359,24 +347,33 @@ def build_graph(retriever, llm):
         if not context:
             return {"answer": "No answer found in Ayurvedic texts.", "context": "", "sources": []}
 
-        # Extract source metadata for attribution
+        # Build sources with document name, page, and paragraph excerpt
         sources = []
-        seen_sources = set()
-        for doc in relevant_docs:
-            source_path = doc.metadata.get("source", "Unknown")
-            page = doc.metadata.get("page", 0)
-            # Extract just the filename from the full path
-            source_name = source_path.split("/")[-1].split("\\")[-1] if source_path != "Unknown" else "Unknown"
-            source_key = f"{source_name}:{page}"
-            if source_key not in seen_sources:
-                seen_sources.add(source_key)
+        seen_keys = set()
+        for i, doc in enumerate(relevant_docs):
+            meta = doc.metadata or {}
+            raw_source = meta.get("source", "Unknown")
+            # Extract just filename from full path (works on both / and \ separators)
+            filename = os.path.basename(raw_source) if raw_source != "Unknown" else "Unknown"
+            page_0indexed = meta.get("page", None)
+            page = (page_0indexed + 1) if page_0indexed is not None else None
+            # Use first 400 chars of chunk as reference paragraph
+            paragraph = doc.page_content[:400].strip()
+            key = f"{filename}_{page}"
+            if key not in seen_keys:
+                seen_keys.add(key)
                 sources.append({
-                    "document": source_name,
-                    "page": page + 1  # Convert 0-indexed to 1-indexed for display
+                    "document": filename,
+                    "page": page,
+                    "paragraph": paragraph,
+                    "chunk_id": f"chunk_{page_0indexed}_{i}"
                 })
 
         out = llm.invoke(
-            rag_generation_prompt.format_messages(question=state["question"], context=context)
+            rag_generation_prompt.format_messages(
+                question=state["question"],
+                context=context,
+            )
         )
         return {"answer": out.content, "context": context, "sources": sources}
 
@@ -482,7 +479,6 @@ def build_graph(retriever, llm):
     g.add_node("is_use", is_use)
     g.add_node("rewrite_question", rewrite_question)
 
-    # Start with safety check
     g.add_edge(START, "safety_check")
     g.add_conditional_edges(
         "safety_check",
@@ -490,7 +486,6 @@ def build_graph(retriever, llm):
         {"blocked_response": "blocked_response", "decide_retrieval": "decide_retrieval"},
     )
     g.add_edge("blocked_response", END)
-
     g.add_conditional_edges(
         "decide_retrieval",
         route_after_decide,

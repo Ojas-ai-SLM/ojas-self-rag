@@ -5,13 +5,13 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import List, Optional
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from langchain_groq import ChatGroq
 from pydantic import BaseModel
-from typing import List
 
 from rag_pipeline import build_graph
 from vector_store import add_documents_to_index, get_embeddings, load_or_build_index
@@ -100,26 +100,22 @@ app.add_middleware(
 )
 
 
+# --- Request / Response models ---
 class ChatRequest(BaseModel):
     question: str
 
-class SourceInfo(BaseModel):
+class Source(BaseModel):
     document: str
-    page: int
+    page: Optional[int] = None
+    paragraph: str
+    chunk_id: str
 
 class ChatResponse(BaseModel):
     answer: str
-    sources: List[SourceInfo] = []
+    sources: List[Source] = []
 
 
-@app.get("/health")
-async def health():
-    if state.get("error"):
-        return {"status": "error", "pipeline_ready": False, "error": state["error"]}
-    return {"status": "ok" if state.get("ready") else "loading", "pipeline_ready": state.get("ready", False)}
-
-
-# --- Guardrail patterns (simple checks before LLM) ---
+# --- Guardrail patterns (fast checks before hitting LLM) ---
 GREETINGS = [
     "hi", "hello", "hey", "hii", "hiii", "howdy", "greetings",
     "good morning", "good afternoon", "good evening", "good night",
@@ -138,14 +134,11 @@ ABOUT_OJAS = [
 ]
 
 def get_guardrail_response(question: str):
-    """Simple pattern-based guardrails for greetings, about, and off-topic.
-
-    Note: Harmful query detection is handled by the LLM-based safety_check node
-    in the graph pipeline for more robust and flexible filtering.
+    """Pattern-based guardrails for greetings, about, off-topic.
+    Harmful queries are handled by the LLM safety_check node inside the graph.
     """
     q = question.lower().strip().rstrip("?!")
 
-    # Greeting
     if q in GREETINGS or any(q.startswith(g) for g in GREETINGS):
         return (
             "Namaste! 🙏 I am Ojas.ai, your Ayurvedic wellness assistant. "
@@ -157,7 +150,6 @@ def get_guardrail_response(question: str):
             "How can I assist you on your wellness journey today?"
         )
 
-    # About Ojas
     if any(phrase in q for phrase in ABOUT_OJAS):
         return (
             "I am Ojas.ai, an AI assistant specialized in Ayurveda — the ancient Indian science of life. "
@@ -167,16 +159,26 @@ def get_guardrail_response(question: str):
             "Please consult a qualified Ayurvedic practitioner for personalized medical advice."
         )
 
-    # Off-topic (harmless but not Ayurveda-related)
     if any(keyword in q for keyword in OFF_TOPIC_KEYWORDS):
         return (
             "I specialize in Ayurveda and holistic wellness. "
             "I am not able to help with that topic, but I would be happy to answer any questions "
             "about Ayurvedic herbs, remedies, doshas, or natural wellness. "
-            "What Ayurvedic topic can I help you with? Can you please ask an Ayurveda-related question?"
+            "What Ayurvedic topic can I help you with?"
         )
 
     return None
+
+
+# --- Endpoints ---
+@app.get("/health")
+async def health():
+    if state.get("error"):
+        return {"status": "error", "pipeline_ready": False, "error": state["error"]}
+    return {
+        "status": "ok" if state.get("ready") else "loading",
+        "pipeline_ready": state.get("ready", False)
+    }
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -188,17 +190,15 @@ async def chat(req: ChatRequest):
     if not req.question.strip():
         raise HTTPException(status_code=400, detail="Question cannot be empty.")
 
-    # Check guardrails before hitting the RAG pipeline
+    # Fast pattern-based guardrails (no LLM call)
     guardrail_response = get_guardrail_response(req.question)
     if guardrail_response:
-        return ChatResponse(answer=guardrail_response)
+        return ChatResponse(answer=guardrail_response, sources=[])
 
     initial = {
         "question": req.question,
-        # Safety check
         "is_safe": True,
         "safety_response": "",
-        # Retrieval
         "retrieval_query": "",
         "rewrite_tries": 0,
         "docs": [],
@@ -220,7 +220,7 @@ async def chat(req: ChatRequest):
 
     return ChatResponse(
         answer=result.get("answer", ""),
-        sources=result.get("sources", [])
+        sources=result.get("sources", []),
     )
 
 
